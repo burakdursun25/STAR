@@ -1,0 +1,644 @@
+<div align="center">
+
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue?style=flat-square&logo=python)
+![MediaPipe](https://img.shields.io/badge/MediaPipe-0.10%2B-orange?style=flat-square)
+![OpenCV](https://img.shields.io/badge/OpenCV-4.8%2B-green?style=flat-square&logo=opencv)
+![PyTorch](https://img.shields.io/badge/PyTorch-2.1%2B-red?style=flat-square&logo=pytorch)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-teal?style=flat-square&logo=fastapi)
+![License](https://img.shields.io/badge/License-MIT-purple?style=flat-square)
+
+**A Python-based, sensorless motion capture system that maps real-time human movement onto a virtual avatar using only a standard camera — no wearables required.**
+
+[Quick Start](#-quick-start) · [Architecture](#-system-architecture) · [Functions](#-function-catalog) · [Roadmap](#-project-roadmap) · [Installation](#-installation)
+
+</div>
+
+---
+
+## 📌 Project Overview
+
+LiveSync Avatar scans the human body in real time using an ordinary RGB camera, extracts a full skeletal structure, and mirrors those movements onto a virtual character inside a simulated 3D environment — entirely through computer vision, with no special hardware.
+
+### Why This Project?
+
+| Problem | Current Solutions | LiveSync Approach |
+|---|---|---|
+| Motion capture is expensive | $10,000+ suits & sensors | Any webcam is enough |
+| Complex setup | Days of calibration | Plug & play, 1 command |
+| High latency | 100ms+ with wearables | ≤ 50ms target latency |
+| Platform lock-in | Proprietary software stacks | Open source, Python-native |
+| Poor scalability | Single-user only | Multi-client via WebSocket |
+
+---
+
+## 🏗️ System Architecture
+
+The system is composed of three independent layers. Each layer communicates with the next through well-defined data contracts.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                     LiveSync Avatar Pipeline                        │
+│                                                                     │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────────────┐  │
+│  │   LAYER 1    │    │   LAYER 2    │    │       LAYER 3        │  │
+│  │    INPUT     │───▶│  PROCESSING  │───▶│       OUTPUT         │  │
+│  │              │    │              │    │                      │  │
+│  │ CameraStream │    │ PoseDetector │    │  AvatarController    │  │
+│  │ FrameBuffer  │    │SkeletonBuild │    │  MetaEnvironment     │  │
+│  │DepthEstimator│    │MotionSmoother│    │  StreamBroadcaster   │  │
+│  │              │    │ BoneMapper   │    │                      │  │
+│  └──────────────┘    └──────────────┘    └──────────────────────┘  │
+│                                                                     │
+│  ⏱ Target Latency: Camera → Avatar ≤ 16ms  |  Broadcast ≤ 34ms    │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Data Flow Map
+
+```
+[Camera]
+   │
+   │  BGR ndarray (1920×1080 @ 60fps)
+   ▼
+[DepthEstimator]  ◀── MiDaS Model (monocular depth estimation)
+   │
+   │  RGB + Depth Map (H×W float32)
+   ▼
+[PoseDetector]  ◀── MediaPipe BlazePose (33 keypoints)
+   │
+   │  Landmark list [(x, y, z, visibility) × 33]
+   ▼
+[SkeletonBuilder]
+   │
+   │  Joint Graph — bone hierarchy (parent → child)
+   ▼
+[MotionSmoother]  ◀── Kalman Filter (per-joint)
+   │
+   │  Smoothed joint positions
+   ▼
+[BoneRotationMapper]
+   │
+   │  Quaternion rotations per bone
+   ▼
+[AvatarController]
+   │
+   │  Applied pose (avatar transform tree)
+   ├──▶ [MetaEnvironment]   →  3D scene render
+   └──▶ [StreamBroadcaster] →  WebSocket JSON broadcast
+```
+
+---
+
+## 📁 Project File Structure
+
+```
+livesync-avatar/
+│
+├── README.md
+├── requirements.txt
+├── setup.py
+├── config.yaml                        # System-wide configuration
+│
+├── src/
+│   ├── __init__.py
+│   │
+│   ├── input/                         # LAYER 1 — Input Modules
+│   │   ├── __init__.py
+│   │   ├── camera_stream.py           # Camera capture
+│   │   ├── frame_buffer.py            # Frame queue management
+│   │   └── depth_estimator.py         # MiDaS depth estimation
+│   │
+│   ├── processing/                    # LAYER 2 — Processing Modules
+│   │   ├── __init__.py
+│   │   ├── pose_detector.py           # MediaPipe BlazePose
+│   │   ├── skeleton_builder.py        # Bone hierarchy construction
+│   │   ├── motion_smoother.py         # Kalman filter
+│   │   └── bone_rotation_mapper.py    # Coordinates → Quaternion
+│   │
+│   ├── output/                        # LAYER 3 — Output Modules
+│   │   ├── __init__.py
+│   │   ├── avatar_controller.py       # Virtual character driver
+│   │   ├── meta_environment.py        # 3D scene management
+│   │   └── stream_broadcaster.py      # WebSocket broadcast server
+│   │
+│   └── utils/
+│       ├── __init__.py
+│       ├── math_utils.py              # Quaternion & matrix helpers
+│       ├── visualization.py           # Debug overlay rendering
+│       └── logger.py                  # Structured logging
+│
+├── models/
+│   ├── midas/                         # MiDaS depth model weights
+│   └── blazepose/                     # BlazePose model weights
+│
+├── assets/
+│   ├── avatars/                       # 3D character files (.glb, .fbx)
+│   └── environments/                  # Meta scene assets
+│
+├── tests/
+│   ├── test_input.py
+│   ├── test_processing.py
+│   ├── test_output.py
+│   └── test_integration.py
+│
+├── notebooks/
+│   ├── 01_camera_calibration.ipynb
+│   ├── 02_pose_analysis.ipynb
+│   └── 03_motion_smoothing.ipynb
+│
+└── docs/
+    ├── architecture.md
+    ├── api_reference.md
+    └── deployment.md
+```
+
+---
+
+## 🔧 Module Details
+
+### Layer 1 — Input
+
+#### `CameraStream` — `src/input/camera_stream.py`
+The foundational module that captures real-time frames from a camera.
+
+**What it will do:**
+- Connect to USB or IP cameras via OpenCV
+- Read resolution and FPS from `config.yaml`
+- Run a thread-safe frame-reading loop with minimal blocking
+- Expose the camera intrinsic matrix for calibration downstream
+
+**Core Functions:**
+
+```python
+def __init__(self, camera_id: int = 0, width: int = 1920, height: int = 1080, fps: int = 60)
+def start() -> None                          # Starts the capture thread
+def stop() -> None                           # Thread-safe shutdown
+def read() -> tuple[bool, np.ndarray]        # Returns the latest frame
+def get_intrinsics() -> CameraIntrinsics     # Calibration parameters
+```
+
+---
+
+#### `FrameBuffer` — `src/input/frame_buffer.py`
+Queues incoming frames and manages processing backpressure.
+
+**What it will do:**
+- Maintain a thread-safe FIFO queue for incoming frames
+- Drop the oldest frame when the queue is full to prevent memory bloat
+- Track and log frame drop rate and processing latency
+- Expose buffer health statistics for monitoring
+
+**Core Functions:**
+
+```python
+def push(frame: np.ndarray) -> None          # Enqueues a new frame
+def pop() -> np.ndarray | None               # Dequeues the next frame
+def get_stats() -> BufferStats               # Latency & drop statistics
+def clear() -> None                          # Flush the entire queue
+```
+
+---
+
+#### `DepthEstimator` — `src/input/depth_estimator.py`
+Produces a metric depth map from a single RGB camera.
+
+**What it will do:**
+- Run the MiDaS model for monocular depth estimation
+- Convert an RGB frame into a float32 depth map
+- Automatically use CUDA if a GPU is available, otherwise fall back to CPU
+- Normalize the depth map to a 0–1 range for downstream use
+
+**Core Functions:**
+
+```python
+def load_model(model_type: str = "MiDaS_small") -> None
+def estimate(frame: np.ndarray) -> np.ndarray        # Returns float32 depth map
+def to_pointcloud(depth: np.ndarray) -> np.ndarray   # Returns (N, 3) point cloud
+```
+
+---
+
+### Layer 2 — Processing
+
+#### `PoseDetector` — `src/processing/pose_detector.py`
+Detects 33 body keypoints in 3D space.
+
+**What it will do:**
+- Run MediaPipe BlazePose to extract body landmarks from every frame
+- Output (x, y, z, visibility) for each of the 33 landmarks
+- Select the largest detected person when multiple are in frame
+- Skip frames where landmark confidence falls below the configured threshold
+
+**BlazePose 33 Landmark Map:**
+
+```
+Head:        0–10   (nose, eyes, ears, mouth)
+Upper body: 11–16   (shoulders, elbows, wrists)
+Lower body: 23–28   (hips, knees, ankles)
+Hands:      17–22   (pinky, index, thumb tips)
+Feet:       29–32   (heel, foot index)
+```
+
+**Core Functions:**
+
+```python
+def detect(frame: np.ndarray) -> PoseResult | None
+def draw_landmarks(frame: np.ndarray, result: PoseResult) -> np.ndarray
+def get_confidence() -> float
+```
+
+---
+
+#### `SkeletonBuilder` — `src/processing/skeleton_builder.py`
+Converts the raw landmark list into a hierarchical bone structure.
+
+**What it will do:**
+- Map 33 landmarks into 24 named bone connections
+- Build a parent-child bone hierarchy rooted at the hips
+- Compute and normalize bone lengths relative to the T-pose reference
+- Serialize the skeleton to a dictionary for downstream JSON transport
+
+**Bone Hierarchy:**
+
+```
+Hips (Root)
+├── Spine
+│   ├── Chest
+│   │   ├── UpperArm_L → LowerArm_L → Hand_L
+│   │   ├── UpperArm_R → LowerArm_R → Hand_R
+│   │   └── Neck → Head
+├── UpperLeg_L → LowerLeg_L → Foot_L → Toe_L
+└── UpperLeg_R → LowerLeg_R → Foot_R → Toe_R
+```
+
+**Core Functions:**
+
+```python
+def build(landmarks: list[Landmark]) -> Skeleton
+def get_bone_length(bone_name: str) -> float
+def normalize_to_tpose(skeleton: Skeleton) -> Skeleton
+def to_dict() -> dict                        # JSON-serializable output
+```
+
+---
+
+#### `MotionSmoother` — `src/processing/motion_smoother.py`
+Removes jitter and noise to produce fluid, natural motion.
+
+**What it will do:**
+- Run an independent Kalman filter for every tracked joint
+- Tune measurement noise (R) and process noise (Q) via config
+- Smooth rapid micro-jitter while preserving intentional fast movements
+- Maintain a sliding window of historical frames for state prediction
+
+**Core Functions:**
+
+```python
+def __init__(self, n_joints: int = 33, process_noise: float = 1e-4)
+def update(joints: np.ndarray) -> np.ndarray    # (33, 3) → smoothed (33, 3)
+def reset() -> None                              # Resets all filter states
+```
+
+---
+
+#### `BoneRotationMapper` — `src/processing/bone_rotation_mapper.py`
+Converts world-space joint positions into virtual bone rotations.
+
+**What it will do:**
+- Compute a local coordinate frame for every bone in the hierarchy
+- Convert Euler angles to Quaternions to eliminate gimbal lock
+- Calculate the relative rotation from the T-pose reference per bone
+- Apply anatomical joint constraints (e.g. elbows cannot hyperextend)
+- Align output with the avatar rig coordinate system (Y-up, Z-forward)
+
+**Core Functions:**
+
+```python
+def world_to_local(skeleton: Skeleton) -> dict[str, np.ndarray]
+def euler_to_quat(euler: np.ndarray) -> np.quaternion
+def compute_rotation(bone: Bone, reference: Bone) -> np.quaternion
+def apply_constraints(rotations: dict) -> dict    # Enforce joint limits
+```
+
+---
+
+### Layer 3 — Output
+
+#### `AvatarController` — `src/output/avatar_controller.py`
+Applies computed bone rotations to the 3D avatar character.
+
+**What it will do:**
+- Load a GLB or FBX avatar and bind it to the bone rig
+- Update each bone with its corresponding Quaternion rotation every frame
+- Translate the root bone position to reflect the user's spatial movement
+- Pass the final avatar transform tree to the renderer each frame
+
+**Core Functions:**
+
+```python
+def load_avatar(path: str) -> None
+def apply_rotations(rotations: dict[str, np.quaternion]) -> None
+def set_root_position(position: np.ndarray) -> None
+def get_current_pose() -> AvatarPose
+```
+
+---
+
+#### `MetaEnvironment` — `src/output/meta_environment.py`
+Manages the 3D virtual world the avatar inhabits.
+
+**What it will do:**
+- Set up and render a 3D scene using Panda3D
+- Load environment assets including skybox, ground plane, and props
+- Handle collision detection between the avatar and the environment
+- Adjust the virtual camera dynamically based on the user's perspective
+
+**Core Functions:**
+
+```python
+def setup_scene(environment: str = "default") -> None
+def update(avatar_pose: AvatarPose, dt: float) -> None
+def render_frame() -> np.ndarray
+def add_object(name: str, model_path: str, position: tuple) -> None
+```
+
+---
+
+#### `StreamBroadcaster` — `src/output/stream_broadcaster.py`
+Broadcasts pose data in real time over WebSocket.
+
+**What it will do:**
+- Start a FastAPI + WebSocket server (default: `ws://0.0.0.0:8765`)
+- Compress pose payloads with msgpack (~3× smaller than raw JSON)
+- Handle multiple simultaneous clients without blocking the main pipeline
+- Automatically reconnect dropped clients using exponential backoff
+
+**Core Functions:**
+
+```python
+async def start(host: str = "0.0.0.0", port: int = 8765) -> None
+async def broadcast(pose: AvatarPose) -> None
+async def stop() -> None
+def get_connected_clients() -> int
+```
+
+---
+
+## 📋 Function Catalog (Full Table)
+
+| # | Function | Module | Type | Input | Output | Target Time |
+|---|----------|--------|------|-------|--------|-------------|
+| 1 | `capture_frame()` | CameraStream | Input | camera_id, fps | BGR ndarray | < 1ms |
+| 2 | `push() / pop()` | FrameBuffer | Internal | ndarray | ndarray | < 0.1ms |
+| 3 | `estimate_depth()` | DepthEstimator | Internal | RGB frame | depth map | < 5ms |
+| 4 | `to_pointcloud()` | DepthEstimator | Internal | depth map | (N,3) array | < 2ms |
+| 5 | `detect()` | PoseDetector | Internal | RGB + depth | PoseResult | < 8ms |
+| 6 | `draw_landmarks()` | PoseDetector | Debug | frame + result | BGR frame | < 1ms |
+| 7 | `build()` | SkeletonBuilder | Internal | Landmark list | Skeleton | < 1ms |
+| 8 | `normalize_to_tpose()` | SkeletonBuilder | Internal | Skeleton | Skeleton | < 0.5ms |
+| 9 | `update()` | MotionSmoother | Internal | (33,3) array | (33,3) array | < 1ms |
+| 10 | `world_to_local()` | BoneRotationMapper | Internal | Skeleton | dict[str, ndarray] | < 1ms |
+| 11 | `euler_to_quat()` | BoneRotationMapper | Internal | Euler angles | Quaternion | < 0.1ms |
+| 12 | `apply_constraints()` | BoneRotationMapper | Internal | Rotation dict | Rotation dict | < 0.5ms |
+| 13 | `apply_rotations()` | AvatarController | Output | Quaternion dict | void | < 2ms |
+| 14 | `render_frame()` | MetaEnvironment | Output | AvatarPose | ndarray | < 10ms |
+| 15 | `broadcast()` | StreamBroadcaster | Event | AvatarPose | WS message | < 2ms |
+| **—** | **Full Pipeline** | **All Modules** | — | **Camera Frame** | **Live Avatar** | **≤ 33ms** |
+
+---
+
+## 🗺️ Project Roadmap
+
+### Phase 0 — Setup & Environment (Week 1)
+**Goal:** Establish the development environment and validate all tooling before writing any feature code.
+
+- [ ] Create repository and define branch strategy (`main`, `dev`, `feature/*`)
+- [ ] Write `requirements.txt` and `setup.py`
+- [ ] Design `config.yaml` schema covering all module parameters
+- [ ] Camera calibration notebook (`01_camera_calibration.ipynb`)
+- [ ] GitHub Actions CI: lint + test on every push to `dev`
+- [ ] Configure code standards: `black`, `ruff`, `mypy`
+
+---
+
+### Phase 1 — Input Layer (Weeks 2–3)
+**Goal:** Reliably capture frames from the camera and produce a depth map for every frame.
+
+- [ ] `CameraStream` class — thread-safe frame reading loop
+- [ ] `FrameBuffer` class — FIFO queue with drop-and-log logic
+- [ ] MiDaS model download script (`scripts/download_models.py`)
+- [ ] `DepthEstimator` class — automatic GPU/CPU device selection
+- [ ] Unit tests: `tests/test_input.py`
+- [ ] Frame latency benchmark — measure capture + depth time per frame
+
+**Success Criteria:** Sustained 60fps capture, depth estimation consistently < 5ms
+
+---
+
+### Phase 2 — Skeleton Detection (Weeks 4–5)
+**Goal:** Detect all 33 body landmarks in 3D space and construct the bone hierarchy.
+
+- [ ] MediaPipe BlazePose integration and model loading
+- [ ] `PoseDetector` class — landmark detection with confidence filtering
+- [ ] `SkeletonBuilder` class — 24-bone hierarchy built from 33 landmarks
+- [ ] T-pose reference system — design, capture, and storage
+- [ ] Debug visualization overlay (`src/utils/visualization.py`)
+- [ ] Partial unit tests: `tests/test_processing.py`
+- [ ] Pose analysis notebook (`02_pose_analysis.ipynb`)
+
+**Success Criteria:** 33-landmark detection < 8ms per frame, average visibility ≥ 90%
+
+---
+
+### Phase 3 — Motion Mapping (Weeks 6–7)
+**Goal:** Convert raw joint coordinates into smooth, anatomically valid bone rotations.
+
+- [ ] `MotionSmoother` class — per-joint Kalman filter implementation
+- [ ] `BoneRotationMapper` class — world-to-local Quaternion pipeline
+- [ ] Gimbal lock validation tests using synthetic input
+- [ ] Anatomical joint constraints (shoulder, knee, elbow angle limits)
+- [ ] Motion smoothing notebook (`03_motion_smoothing.ipynb`)
+- [ ] Per-step latency profiling — every function timed individually
+
+**Success Criteria:** End-to-end pipeline ≤ 16ms, visually jitter-free avatar motion
+
+---
+
+### Phase 4 — Avatar & Environment (Weeks 8–9)
+**Goal:** Apply rotations to a 3D character and render it inside a live virtual scene.
+
+- [ ] Panda3D setup and base scene construction
+- [ ] GLB avatar loading and bone rig binding
+- [ ] `AvatarController` class — frame-by-frame rotation application
+- [ ] Default Meta environment (skybox, ground plane, props)
+- [ ] `MetaEnvironment` class — scene update and render loop
+- [ ] Basic avatar–environment collision detection (floor contact)
+
+**Success Criteria:** Complete end-to-end pipeline running at < 33ms per frame
+
+---
+
+### Phase 5 — Broadcast & Integration (Week 10)
+**Goal:** Stream pose data over the network and integrate all modules into a single runnable pipeline.
+
+- [ ] FastAPI + WebSocket server setup and configuration
+- [ ] `StreamBroadcaster` class — msgpack compression, multi-client fan-out
+- [ ] Client reconnection logic with exponential backoff
+- [ ] Full integration tests: `tests/test_integration.py`
+- [ ] Main entry point (`main.py`) — wires all three layers together
+- [ ] Global error handling and watchdog auto-restart
+
+**Success Criteria:** 5+ simultaneous WebSocket clients supported, data loss < 0.1%
+
+---
+
+### Phase 6 — Optimization & Release (Weeks 11–12)
+**Goal:** Maximize performance, complete all documentation, and ship the v1.0.0 release.
+
+- [ ] GPU optimization — extend CUDA support across all inference steps
+- [ ] Model quantization for faster inference on CPU-only machines
+- [ ] Docker container (`Dockerfile` + `docker-compose.yml`)
+- [ ] Full API reference documentation (`docs/api_reference.md`)
+- [ ] Demo video and animated GIF for the README
+- [ ] PyPI package release (`pip install livesync-avatar`)
+
+**Success Criteria:** v1.0.0 tagged and released, available on PyPI, demo video live
+
+---
+
+## ⚙️ Installation
+
+### Requirements
+
+- Python 3.10+
+- CUDA 11.8+ (optional, for GPU acceleration)
+- Any webcam or RGB-D camera
+
+### Quick Start
+
+```bash
+# Clone the repository
+git clone https://github.com/your-username/livesync-avatar.git
+cd livesync-avatar
+
+# Create a virtual environment
+python -m venv venv
+source venv/bin/activate        # Linux / macOS
+# venv\Scripts\activate         # Windows
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Download AI model weights
+python scripts/download_models.py
+
+# Run the system
+python main.py --camera 0 --avatar assets/avatars/default.glb
+```
+
+### `config.yaml` Example
+
+```yaml
+camera:
+  device_id: 0
+  width: 1920
+  height: 1080
+  fps: 60
+
+depth:
+  model: "MiDaS_small"       # MiDaS_small | DPT_Large | DPT_Hybrid
+  device: "auto"              # auto | cpu | cuda
+
+pose:
+  model_complexity: 1         # 0 = fast  |  1 = balanced  |  2 = accurate
+  min_detection_confidence: 0.7
+  min_tracking_confidence: 0.5
+
+smoother:
+  process_noise: 1.0e-4
+  measurement_noise: 1.0e-2
+
+broadcast:
+  host: "0.0.0.0"
+  port: 8765
+  compression: "msgpack"
+
+avatar:
+  model_path: "assets/avatars/default.glb"
+  coordinate_system: "y_up_z_forward"
+```
+
+---
+
+## 📦 Dependencies
+
+```txt
+# Computer Vision
+mediapipe>=0.10.0
+opencv-python>=4.8.0
+torch>=2.1.0
+torchvision>=0.16.0
+timm>=0.9.0                   # Required by MiDaS
+
+# Math & Filtering
+numpy>=1.26.0
+scipy>=1.11.0
+filterpy>=1.4.5               # Kalman filter
+numpy-quaternion>=2022.4.3
+
+# 3D & Avatar
+panda3d>=1.10.13
+trimesh>=4.1.0
+open3d>=0.17.0
+
+# Networking & API
+fastapi>=0.110.0
+uvicorn>=0.27.0
+websockets>=12.0
+msgpack>=1.0.7
+
+# Development
+pytest>=7.4.0
+black>=23.0.0
+ruff>=0.1.0
+mypy>=1.5.0
+```
+
+---
+
+## 🧪 Testing
+
+```bash
+# Run all tests
+pytest tests/ -v
+
+# Input layer only
+pytest tests/test_input.py -v
+
+# Performance benchmarks
+pytest tests/ -k "benchmark" --benchmark-only
+
+# Coverage report
+pytest tests/ --cov=src --cov-report=html
+```
+
+---
+
+## 🤝 Contributing
+
+1. Branch off `dev` using the convention `feature/your-feature-name`
+2. Implement your changes and add corresponding tests
+3. Format code with `black` and lint with `ruff`
+4. Open a Pull Request targeting the `dev` branch
+
+---
+
+## 📄 License
+
+This project is licensed under the MIT License. See the `LICENSE` file for details.
+
+---
+
+<div align="center">
+  <sub>LiveSync Avatar — Sensorless real-time motion capture powered by Advanced Computer Vision</sub>
+</div>
