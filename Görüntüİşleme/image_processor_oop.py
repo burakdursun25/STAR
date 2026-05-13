@@ -174,139 +174,118 @@ class AnalysisConfig:
 # ============================================================================
 
 class SkeletalMapper:
-    """Pose landmarks'ı Blender skeletal system'e dönüştür"""
-    
-    # Landmark indices
-    LANDMARKS = {
-        "nose": 0,
-        "left_shoulder": 11, "right_shoulder": 12,
-        "left_elbow": 13, "right_elbow": 14,
-        "left_wrist": 15, "right_wrist": 16,
-        "left_hip": 23, "right_hip": 24,
-        "left_knee": 25, "right_knee": 26,
-        "left_ankle": 27, "right_ankle": 28,
-    }
+    """MediaPipe pose landmarks'ı Rigify Metarig kemik isimlerine dönüştürür.
+
+    Çıktı isimler Rigify Metarig ile birebir aynıdır:
+      spine, spine.001 ... spine.003, spine.006, spine.007
+      shoulder.L/R, upper_arm.L/R, forearm.L/R, hand.L/R
+      thigh.L/R, shin.L/R, foot.L/R, toe.L/R
+    """
     
     @staticmethod
-    def get_bone_data(pose_landmarks: List[LandmarkPoint]) -> Dict[str, Any]:
-        """Landmarks'ı Blender bone transformations'a dönüştür"""
+    def _pt(lm, i):
+        """Landmark'i Blender Y-up koordinat sistemine cevir.
+        MediaPipe: +X sola (kamera goruntusu), +Y asagi, +Z kameraya dogru
+        Blender:   +X saga, +Y yukari, +Z kameraya dogru
+        Donusum:   x=-mp.x (aynalama), y=-mp.y (ters), z=-mp.z
+        """
+        return np.array([-lm[i].x, -lm[i].y, -lm[i].z], dtype=np.float64)
+
+    @staticmethod
+    def _dir(s, e):
+        """Baslangic-bitis noktalarindan normalize youn vektoru dondur.
+        Euler acisi degil, direkt [dx, dy, dz] gonderilir.
+        Addon bu vektoru kemigin rest-Y ile karsilastirir -> dogru rotasyon.
+        Varsayilan: [0,1,0] = yukari (spine rest yonu).
+        """
+        d = e - s
+        n = np.linalg.norm(d)
+        if n < 1e-6:
+            return [0.0, 1.0, 0.0]
+        d = d / n
+        return [float(d[0]), float(d[1]), float(d[2])]
+
+    @staticmethod
+    def get_bone_data(pose_landmarks):
+        """Rigify Metarig isimli kemik verisi döndür."""
         if len(pose_landmarks) < 29:
             return {}
-        
+
+        lm = pose_landmarks
+        pt = SkeletalMapper._pt
+        dr = SkeletalMapper._dir   # normalize yon vektoru
+
+        # Temel noktalar
+        l_hip   = pt(lm, 23);  r_hip   = pt(lm, 24)
+        l_shldr = pt(lm, 11);  r_shldr = pt(lm, 12)
+        l_elbow = pt(lm, 13);  r_elbow = pt(lm, 14)
+        l_wrist = pt(lm, 15);  r_wrist = pt(lm, 16)
+        l_knee  = pt(lm, 25);  r_knee  = pt(lm, 26)
+        l_ankle = pt(lm, 27);  r_ankle = pt(lm, 28)
+        l_ear   = pt(lm,  7);  r_ear   = pt(lm,  8)
+        nose    = pt(lm,  0)
+
+        hip_c   = (l_hip   + r_hip)   / 2
+        shldr_c = (l_shldr + r_shldr) / 2
+        ear_c   = (l_ear   + r_ear)   / 2
+        head_top = nose + (nose - ear_c) * 0.35
+
+        has_feet = len(lm) >= 33
+        l_foot = pt(lm, 31) if has_feet else l_ankle + np.array([0, 0.05, 0.1])
+        r_foot = pt(lm, 32) if has_feet else r_ankle + np.array([0, 0.05, 0.1])
+        l_toe  = l_foot + (l_foot - l_ankle) * 0.3
+        r_toe  = r_foot + (r_foot - r_ankle) * 0.3
+
         bones = {}
-        
-        # Helper function: yönlendirmeyi hesapla
-        def vector_to_rotation(v: np.ndarray) -> Tuple[float, float, float]:
-            """Vector'den Euler açıları (radians) türet"""
-            if np.linalg.norm(v) < 1e-6:
-                return (0, 0, 0)
-            v = v / np.linalg.norm(v)
-            yaw = np.arctan2(v[0], v[2])
-            pitch = np.arcsin(-v[1])
-            return (pitch, yaw, 0)
-        
-        # Hip (merkez)
-        left_hip = np.array([pose_landmarks[23].x, pose_landmarks[23].y, pose_landmarks[23].z])
-        right_hip = np.array([pose_landmarks[24].x, pose_landmarks[24].y, pose_landmarks[24].z])
-        hip_center = (left_hip + right_hip) / 2
-        bones["Hips"] = {
-            "position": hip_center.tolist(),
-            "rotation": [0, 0, 0],
+
+        def add(name, pos, s, e, vis=1.0):
+            """rotation = normalize yon vektoru [dx,dy,dz], euler degil."""
+            bones[name] = {
+                "position":   pos.tolist(),
+                "rotation":   dr(s, e),
+                "confidence": float(vis),
+            }
+
+        # Spine: sadece kok kemik doner, aralar rest-yon
+        sv = shldr_c - hip_c
+        bones["spine"] = {
+            "position":   hip_c.tolist(),
+            "rotation":   dr(hip_c, hip_c + sv),
+            "confidence": 1.0,
         }
-        
-        # Sol bacak
-        left_knee = np.array([pose_landmarks[25].x, pose_landmarks[25].y, pose_landmarks[25].z])
-        left_ankle = np.array([pose_landmarks[27].x, pose_landmarks[27].y, pose_landmarks[27].z])
-        
-        left_thigh_vec = left_knee - left_hip
-        bones["LeftUpLeg"] = {
-            "position": left_hip.tolist(),
-            "rotation": list(vector_to_rotation(left_thigh_vec)),
-        }
-        
-        left_calf_vec = left_ankle - left_knee
-        bones["LeftLeg"] = {
-            "position": left_knee.tolist(),
-            "rotation": list(vector_to_rotation(left_calf_vec)),
-        }
-        
-        bones["LeftFoot"] = {
-            "position": left_ankle.tolist(),
-            "rotation": [0, 0, 0],
-        }
-        
-        # Sağ bacak
-        right_knee = np.array([pose_landmarks[26].x, pose_landmarks[26].y, pose_landmarks[26].z])
-        right_ankle = np.array([pose_landmarks[28].x, pose_landmarks[28].y, pose_landmarks[28].z])
-        
-        right_thigh_vec = right_knee - right_hip
-        bones["RightUpLeg"] = {
-            "position": right_hip.tolist(),
-            "rotation": list(vector_to_rotation(right_thigh_vec)),
-        }
-        
-        right_calf_vec = right_ankle - right_knee
-        bones["RightLeg"] = {
-            "position": right_knee.tolist(),
-            "rotation": list(vector_to_rotation(right_calf_vec)),
-        }
-        
-        bones["RightFoot"] = {
-            "position": right_ankle.tolist(),
-            "rotation": [0, 0, 0],
-        }
-        
-        # Sol kol
-        left_shoulder = np.array([pose_landmarks[11].x, pose_landmarks[11].y, pose_landmarks[11].z])
-        left_elbow = np.array([pose_landmarks[13].x, pose_landmarks[13].y, pose_landmarks[13].z])
-        left_wrist = np.array([pose_landmarks[15].x, pose_landmarks[15].y, pose_landmarks[15].z])
-        
-        left_arm_vec = left_elbow - left_shoulder
-        bones["LeftArm"] = {
-            "position": left_shoulder.tolist(),
-            "rotation": list(vector_to_rotation(left_arm_vec)),
-        }
-        
-        left_forearm_vec = left_wrist - left_elbow
-        bones["LeftForeArm"] = {
-            "position": left_elbow.tolist(),
-            "rotation": list(vector_to_rotation(left_forearm_vec)),
-        }
-        
-        bones["LeftHand"] = {
-            "position": left_wrist.tolist(),
-            "rotation": [0, 0, 0],
-        }
-        
-        # Sağ kol
-        right_shoulder = np.array([pose_landmarks[12].x, pose_landmarks[12].y, pose_landmarks[12].z])
-        right_elbow = np.array([pose_landmarks[14].x, pose_landmarks[14].y, pose_landmarks[14].z])
-        right_wrist = np.array([pose_landmarks[16].x, pose_landmarks[16].y, pose_landmarks[16].z])
-        
-        right_arm_vec = right_elbow - right_shoulder
-        bones["RightArm"] = {
-            "position": right_shoulder.tolist(),
-            "rotation": list(vector_to_rotation(right_arm_vec)),
-        }
-        
-        right_forearm_vec = right_wrist - right_elbow
-        bones["RightForeArm"] = {
-            "position": right_elbow.tolist(),
-            "rotation": list(vector_to_rotation(right_forearm_vec)),
-        }
-        
-        bones["RightHand"] = {
-            "position": right_wrist.tolist(),
-            "rotation": [0, 0, 0],
-        }
-        
-        # Başın merkezi
-        nose = np.array([pose_landmarks[0].x, pose_landmarks[0].y, pose_landmarks[0].z])
-        bones["Head"] = {
-            "position": nose.tolist(),
-            "rotation": [0, 0, 0],
-        }
-        
+        # Ara kemikler: [0,1,0] = Blender +Y = yukari = rest yonu
+        for bname, t in [("spine.001", 0.25), ("spine.002", 0.50), ("spine.003", 0.75)]:
+            bones[bname] = {
+                "position":   (hip_c + sv * t).tolist(),
+                "rotation":   [0.0, 1.0, 0.0],
+                "confidence": 1.0,
+            }
+
+        add("spine.006", shldr_c, shldr_c, ear_c)   # Boyun
+        add("spine.007", ear_c,   ear_c,   head_top) # Kafa
+
+        # Klavikula
+        add("shoulder.L", shldr_c, shldr_c, l_shldr)
+        add("shoulder.R", shldr_c, shldr_c, r_shldr)
+
+        # Kollar
+        add("upper_arm.L", l_shldr, l_shldr, l_elbow, lm[11].visibility or 1.0)
+        add("forearm.L",   l_elbow, l_elbow, l_wrist, lm[13].visibility or 1.0)
+        add("hand.L",      l_wrist, l_wrist, l_wrist + (l_wrist - l_elbow) * 0.3)
+        add("upper_arm.R", r_shldr, r_shldr, r_elbow, lm[12].visibility or 1.0)
+        add("forearm.R",   r_elbow, r_elbow, r_wrist, lm[14].visibility or 1.0)
+        add("hand.R",      r_wrist, r_wrist, r_wrist + (r_wrist - r_elbow) * 0.3)
+
+        # Bacaklar
+        add("thigh.L", l_hip,   l_hip,   l_knee,  lm[23].visibility or 1.0)
+        add("shin.L",  l_knee,  l_knee,  l_ankle, lm[25].visibility or 1.0)
+        add("foot.L",  l_ankle, l_ankle, l_foot,  lm[27].visibility or 1.0)
+        add("toe.L",   l_foot,  l_foot,  l_toe)
+        add("thigh.R", r_hip,   r_hip,   r_knee,  lm[24].visibility or 1.0)
+        add("shin.R",  r_knee,  r_knee,  r_ankle, lm[26].visibility or 1.0)
+        add("foot.R",  r_ankle, r_ankle, r_foot,  lm[28].visibility or 1.0)
+        add("toe.R",   r_foot,  r_foot,  r_toe)
+
         return bones
 
 
@@ -488,17 +467,70 @@ class LandmarkVisualizer:
         return overlay
 
     def draw_pose(self, frame_bgr: np.ndarray, pose_landmarks: List[LandmarkPoint]) -> np.ndarray:
-        """Pose landmarks'ini görüntüye çiz"""
+        """Pose landmarks'ini goruntuye ciz.
+        Sari (0,255,255) : govde / eklenen kalca+bel noktalar
+        Mavi (255,140,0) : sol kol
+        Kirmizi (255,80,80): sag kol
+        Yesil (0,220,80)  : sol bacak
+        Koyu yesil(0,160,60): sag bacak
+        """
         if not pose_landmarks:
             return frame_bgr
         annotated = frame_bgr.copy()
-        height, width = annotated.shape[:2]
-        for point in pose_landmarks:
-            cx = int(point.x * width)
-            cy = int(point.y * height)
-            cv2.circle(annotated, (cx, cy), self.config.POINT_RADIUS, 
-                      self.config.POINT_COLOR, -1)
+        h, w = annotated.shape[:2]
+        lm = pose_landmarks
+
+        def pxi(i): return (int(lm[i].x * w), int(lm[i].y * h))
+        def ok(i):  return i < len(lm) and (lm[i].visibility or 0) > 0.25
+
+        # Iskelet baglanti cizgileri
+        CONN = [
+            (11,12,(0,200,200)), (11,23,(0,200,200)), (12,24,(0,200,200)), (23,24,(0,200,200)),
+            (11,13,(255,140,0)), (13,15,(255,140,0)),
+            (12,14,(255,80,80)), (14,16,(255,80,80)),
+            (23,25,(0,220,80)),  (25,27,(0,220,80)),  (27,31,(0,220,80)),
+            (24,26,(0,160,60)),  (26,28,(0,160,60)),  (28,32,(0,160,60)),
+            (0, 7,(180,180,180)),(0, 8,(180,180,180)),
+        ]
+        for a,b,col in CONN:
+            if ok(a) and ok(b):
+                cv2.line(annotated, pxi(a), pxi(b), col, 2, cv2.LINE_AA)
+
+        # Grup renkleri
+        GC = {**{i:(180,180,180) for i in range(11)},
+              **{i:(255,140,0) for i in [11,13,15,17,19,21]},
+              **{i:(255,80,80)  for i in [12,14,16,18,20,22]},
+              **{i:(0,220,80)   for i in [23,25,27,29,31]},
+              **{i:(0,160,60)   for i in [24,26,28,30,32]}}
+        for i,pt in enumerate(lm):
+            if (pt.visibility or 0) < 0.2: continue
+            cx,cy = int(pt.x*w), int(pt.y*h)
+            col = GC.get(i,(0,255,255))
+            cv2.circle(annotated,(cx,cy),self.config.POINT_RADIUS,col,-1)
+            cv2.circle(annotated,(cx,cy),self.config.POINT_RADIUS+1,(0,0,0),1)
+
+        # Eklenen kalca/bel noktalar (MediaPipe'da ara omurga yok)
+        EC=(0,255,255); ER=7  # sari, buyuk
+        if len(lm)>=25 and ok(23) and ok(24):
+            lh=lm[23]; rh=lm[24]
+            hx=int((lh.x+rh.x)/2*w); hy=int((lh.y+rh.y)/2*h)
+            cv2.circle(annotated,(hx,hy),ER,EC,-1)
+            cv2.circle(annotated,(hx,hy),ER+1,(0,0,0),1)
+            cv2.putText(annotated,"kalca",(hx+8,hy+4),cv2.FONT_HERSHEY_SIMPLEX,.38,EC,1,cv2.LINE_AA)
+            if ok(11) and ok(12):
+                ls=lm[11]; rs=lm[12]
+                sx=int((ls.x+rs.x)/2*w); sy=int((ls.y+rs.y)/2*h)
+                # Bel = kalca ile omuz arasinin %35'i yukari
+                wx=int(hx*.65+sx*.35); wy=int(hy*.65+sy*.35)
+                cv2.circle(annotated,(wx,wy),ER,EC,-1)
+                cv2.circle(annotated,(wx,wy),ER+1,(0,0,0),1)
+                cv2.putText(annotated,"bel",(wx+8,wy+4),cv2.FONT_HERSHEY_SIMPLEX,.38,EC,1,cv2.LINE_AA)
+                cv2.circle(annotated,(sx,sy),ER-1,EC,-1)
+                cv2.circle(annotated,(sx,sy),ER,(0,0,0),1)
+                cv2.putText(annotated,"omuz_m",(sx+8,sy+4),cv2.FONT_HERSHEY_SIMPLEX,.38,EC,1,cv2.LINE_AA)
+                cv2.line(annotated,(hx,hy),(sx,sy),EC,2,cv2.LINE_AA)  # spine cizgisi
         return annotated
+
 
 
 # ============================================================================
@@ -722,8 +754,11 @@ class SingleCameraRunner(CameraRunner):
                 self.previous_left_hand = result.left_hand_landmarks
                 self.previous_right_hand = result.right_hand_landmarks
                 
-                # UDP gönder
-                self.publisher.send(result.to_dict())
+                # UDP gonder: ham landmarks + hesaplanmis skeleton
+                data_to_send = result.to_dict()
+                if result.pose_landmarks:
+                    data_to_send["skeleton"] = SkeletalMapper.get_bone_data(result.pose_landmarks)
+                self.publisher.send(data_to_send)
                 
                 # Görüntüsü göster
                 output = self.visualizer.draw_pose(frame, result.pose_landmarks)
@@ -848,9 +883,10 @@ class DualCameraRunner(CameraRunner):
 # ============================================================================
 
 if __name__ == "__main__":
-    # Tek kamera kullanmak için:
-    # runner = SingleCameraRunner(camera_index=0)
-    
-    # Dual kamera kullanmak için:
-    runner = DualCameraRunner()
+    # ── Dual kamera (2 kamera gerektirir) ──────────────────────────────────
+    # runner = DualCameraRunner()
+    # ───────────────────────────────────────────────────────────────────────
+
+    # Tek kamera — şu an aktif
+    runner = SingleCameraRunner(camera_index=0)
     runner.run()
